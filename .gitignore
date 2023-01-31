@@ -1,0 +1,7 @@
+*venv
+*.DS_Store
+*.access_token*
+*.url*
+*afile
+*rfile
+*log
