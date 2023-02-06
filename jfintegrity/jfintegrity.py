@@ -23,8 +23,9 @@ import logging
 import threading
 from queue import Empty, Queue
 from docopt import docopt
+from urllib import parse
 from os.path import isfile
-from helpers import get_config
+from .helpers import get_config
 from datetime import datetime
 from sys import exit
 
@@ -35,6 +36,8 @@ ARTIFACT_UNKNOWN = 'trace_failure'
 ARTIFACT_DELETED = 'artifact_deleted'
 ARTIFACT_NOT_DELETED = 'artifact_not_deleted'
 ARTIFACT_IS_FOLDER = 'artifact_is_folder'
+output = []
+after_date = ''
 
 class jfIntegrity():
 
@@ -56,52 +59,66 @@ class jfIntegrity():
             self.logger.setLevel(logging.DEBUG)
         else:
             self.logger.setLevel(logging.INFO)
-        
-        self.test_connection()
 
     def test_connection(self):
-        url = f'{self.server}/artifactory/api'
+        url = f'{self.server}'
         r = None
         try:
             r = requests.get(url, headers=self.headers)
+        except requests.exceptions.MissingSchema:
+            self.logger.error(f'please specify http or https schema with {self.server}')
+            return False
         except requests.exceptions.ConnectionError:
-            self.logger.exception(f'error connecting to {self.server}')
-            exit(1)
+            self.logger.error(f'error connecting to {self.server}')
+            return False
         except requests.exceptions.TooManyRedirects:
             self.logger.error(f'too many redirects for {self.server}, bad url?')
-            exit(1)
+            return False
         finally:
             if r:
                 r.close()
 
+        if r:
+            if 200 <= r.status_code < 300:
+                return True
+            else:
+                self.logger.error(f'test connection to {self.server} failed')
+                return False
+
     def get_stats(self, artifact):
-        url = f'{self.server}/artifactory/api/storage/{artifact}'
+        safe_artifact = parse.quote(artifact)
+        url = f'{self.server}/artifactory/api/storage/{safe_artifact}'
+        r = None
         try:
             r = requests.get(url, headers=self.headers)
         except requests.exceptions.Timeout:
             self.logger.error(f'timeout connecting to {self.server}')
-        except requests.exceptions.RequestException:
+        except requests.exceptions.RequestException as e:
             self.logger.exception(f'unrecoverable exception {e} connecting to {self.server}')
         finally:
-            r.close()
+            if r:
+                r.close()
 
         if r:
             if 200 <= r.status_code < 300:
                 return r.json()
         else:
-            self.logger.error(f'could not get stats for {artifact}, received {r.status_code}')
+            self.logger.error(f'could not get stats for {artifact}')
 
     def get_trace(self, artifact):
-        url = f'{self.server}/artifactory/{artifact}'
+        safe_artifact = parse.quote(artifact)
+        url = f'{self.server}/artifactory/{safe_artifact}'
         params = {'skipUpdateStats': 'true', 'trace': 'null'}
+        r = None
         try:
             r = requests.get(url, headers=self.headers, params=params)
         except requests.exceptions.Timeout:
             self.logger.error(f'timeout connecting to {self.server}')
-        except requests.exceptions.RequestException:
+        except requests.exceptions.RequestException as e:
             self.logger.exception(f'unrecoverable exception {e} connecting to {self.server}')
         finally:
-            r.close()
+            if r:
+                r.close()
 
         if r:
             if 200 <= r.status_code < 300:
@@ -110,7 +127,9 @@ class jfIntegrity():
             self.logger.error(f'could not get trace for {artifact}, received {r.status_code}')
 
     def get_contents(self, repository):
-        url = f'{self.server}/artifactory/api/storage/{repository}'
+        safe_repository = parse.quote(repository)
+        url = f'{self.server}/artifactory/api/storage/{safe_repository}'
+        r = None
         params = {'list': 'null',
                   'deep': '1',
                   'listFolders': '0',
@@ -120,18 +139,76 @@ class jfIntegrity():
             r = requests.get(url, params=params, headers=self.headers)
         except requests.exceptions.Timeout:
             self.logger.error(f'timeout connecting to {self.server}')
-        except requests.exceptions.RequestException:
+        except requests.exceptions.RequestException as e:
             self.logger.exception(f'unrecoverable exception {e} connecting to {self.server}')
         finally:
-            r.close()
+            if r:
+                r.close()
 
         if r:
             if 200 <= r.status_code < 300:
                 return r.json()
         else:
-            self.logger.error(f'could not get contents for {repository}, received {r.status_code}')
+            self.logger.error(f'could not get contents for {repository}')
 
-    def del_artifact(self, q, thread_no):
+    def del_artifact(self, artifact):
+        self.logger.debug(f'start remove artifact {artifact}')
+        global output
+        safe_artifact = parse.quote(artifact)
+        if self.is_folder(safe_artifact):
+            output.append((artifact, ARTIFACT_IS_FOLDER))
+            self.logger.info(f'folder {artifact} will not be deleted')
+            return
+        url = f'{self.server}/artifactory/{safe_artifact}'
+        r = None
+        try:
+            r = requests.delete(url, headers=self.headers)
+        except requests.exceptions.Timeout:
+            self.logger.error(f'timeout connecting to {self.server}')
+        except requests.exceptions.RequestException as e:
+            self.logger.exception(f'unrecoverable exception {e} connecting to {self.server}')
+        finally:
+            if r:
+                r.close()
+        if r:
+            if 200 <= r.status_code < 300:
+                output.append((artifact, ARTIFACT_DELETED))
+                self.logger.info(f'deleted: {artifact}')
+            else:
+                output.append((artifact, ARTIFACT_NOT_DELETED))
+                self.logger.error(f'could not delete artifact for {artifact}, received {r.status_code}')
+        else:
+            output.append((artifact, ARTIFACT_NOT_DELETED))
+            self.logger.error(f'unrecoverable error for artifact {artifact}')
+
+    def qdel_artifact(self, q, thread_no):
+        self.logger.info(f'started trace worker thread {thread_no}')
+        while True:
+            try:
+                artifact = q.get()
+            except Empty:
+                continue
+            else:
+                self.del_artifact(artifact)
+            q.task_done()
+
+    def trace(self, artifact):
+        self.logger.debug(f'started remove artifact {artifact}')
+        global output
+        safe_artifact = parse.quote(artifact)
+        trace = self.get_trace(safe_artifact)
+        if trace:
+            if trace.find(TRACE_SUCCESS) == -1:
+                output.append((artifact, ARTIFACT_BAD))
+                self.logger.info(f'{artifact}: {ARTIFACT_BAD}')
+            else:
+                output.append((artifact, ARTIFACT_GOOD))
+                self.logger.debug(f'{artifact}: {ARTIFACT_GOOD}')
+        else:
+            output.append((artifact, ARTIFACT_UNKNOWN))
+            self.logger.error(f'{artifact}: {ARTIFACT_UNKNOWN}')
+
+    def qtrace(self, q, thread_no):
         global output
         self.logger.info(f'started trace worker thread {thread_no}')
         while True:
@@ -140,50 +217,7 @@ class jfIntegrity():
             except Empty:
                 continue
             else:
-                if self.is_folder(artifact):
-                    output.append((artifact, ARTIFACT_IS_FOLDER))
-                    self.logger.info(f'folder {artifact} will not be deleted')
-                url = f'{self.server}/artifactory/{artifact}'
-                try:
-                    r = requests.delete(url, headers=self.headers)
-                except requests.exceptions.Timeout:
-                    self.logger.error(f'timeout connecting to {self.server}')
-                except requests.exceptions.RequestException:
-                    self.logger.exception(f'unrecoverable exception connecting to {self.server}')
-                finally:
-                    r.close()
-
-                if r:
-                    if 200 <= r.status_code < 300:
-                        output.append((artifact, ARTIFACT_DELETED))
-                        self.logger.info(f'deleted: {artifact}')
-                    else:
-                        output.append((artifact, ARTIFACT_NOT_DELETED))
-                        self.logger.error(f'could not delete artifact for {artifact}, received {r.status_code}')
-                else:
-                    output.append((artifact, ARTIFACT_NOT_DELETED))
-                    self.logger.error(f'unrecoverable error for artifact {artifact}')
-
-    def trace(self, q, thread_no):
-        global output
-        self.logger.info(f'started trace worker thread {thread_no}')
-        while True:
-            try:
-                artifact = q.get()
-            except Empty:
-                continue
-            else:
-                trace = self.get_trace(artifact)
-                if trace:
-                    if trace.find(TRACE_SUCCESS) == -1:
-                        output.append((artifact, ARTIFACT_BAD))
-                        self.logger.info(f'{artifact}: {ARTIFACT_BAD}')
-                    else:
-                        output.append((artifact, ARTIFACT_GOOD))
-                        self.logger.debug(f'{artifact}: {ARTIFACT_GOOD}')
-                else:
-                    output.append((artifact, ARTIFACT_UNKNOWN))
-                    self.logger.error(f'{artifact}: {ARTIFACT_UNKNOWN}')
+                self.trace(artifact)
             q.task_done()
 
     def is_folder(self, item):
@@ -191,6 +225,9 @@ class jfIntegrity():
         if stats:
             if 'children' in stats.keys():
                 self.logger.debug(f'detected folder: {item}')
+                return True
+            elif 'errors' in stats.keys():
+                self.logger.error(f'errors detecting if {item} is a folder')
                 return True
         self.logger.debug(f'detected non folder: {item}')
         return False
@@ -201,13 +238,16 @@ class jfIntegrity():
         return date1 > date2
 
     def read_items(self, file):
+        content = ''
         if not isfile(file):
-            return None
-        
+            self.logger.error(f'non file or cannot read {file}')
+            exit(1)
+
         with open(file, 'r') as f:
             content = f.read()
 
-        return content.strip().split('\n')
+        if content:
+            return content.strip().split('\n')
 
     def cat_artifacts(self, repos, after):
         artifacts = []
@@ -218,6 +258,8 @@ class jfIntegrity():
             if ret:
                 if after:
                     rarts = [ f'{repo}{art["uri"]}' for art in ret['files'] if not art['folder'] and self.is_later(art['lastModified'], after) ]
+                else:
+                    rarts = [ f'{repo}{art["uri"]}' for art in ret['files'] if not art['folder'] ]
             artifacts = artifacts + rarts
         return artifacts
 
@@ -241,9 +283,6 @@ class jfIntegrity():
         return list(set(arts + afile_arts + rfile_arts))
 
 if __name__ == '__main__':
-    output = []
-    after_date = ''
-
     arguments = docopt(__doc__, version='jfintegrity 1.0')
 
     ACCESS_TOKEN = arguments['--access-token']
@@ -255,14 +294,16 @@ if __name__ == '__main__':
         BASE_URL = get_config('.url')
 
     jfi = jfIntegrity(server=BASE_URL, access_token=ACCESS_TOKEN, debug=arguments['-V'])
+    if not jfi.test_connection():
+        print(f'could not connect to artifactory server...please check url')
+        exit(1)
 
     q = Queue()
     if arguments['delete']:
-        pass
-        #artifacts = jfi.read_items(arguments['DEL_FILE'])
-        #for i in range(int(arguments['--threads'])):
-        #    worker = threading.Thread(target=jfi.del_artifact, args=(q, i,), daemon=True)
-        #    worker.start()
+        artifacts = jfi.read_items(arguments['DEL_FILE'])
+        for i in range(int(arguments['--threads'])):
+            worker = threading.Thread(target=jfi.qdel_artifact, args=(q, i,), daemon=True)
+            worker.start()
     elif arguments['check']:
         after_date = arguments['--after']
         artifacts = jfi.compile_artifacts(repos=arguments['REPO'],
@@ -271,7 +312,7 @@ if __name__ == '__main__':
                                           after = after_date)
 
         for i in range(int(arguments['--threads'])):
-            worker = threading.Thread(target=jfi.trace, args=(q, i,), daemon=True)
+            worker = threading.Thread(target=jfi.qtrace, args=(q, i,), daemon=True)
             worker.start()
 
     for artifact in artifacts:
