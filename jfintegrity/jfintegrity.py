@@ -40,8 +40,17 @@ output = []
 after_date = ''
 
 class jfIntegrity():
+    """A class to provide Jfrog artifact integrity checking capabilities."""
+
 
     def __init__(self, server, access_token, debug=False):
+        """
+        Initialize class.
+
+        :param server: String name of artifactory server
+        :param access_token: String access token with sufficient permissions to repositories and artifacts of interest
+        :param debug: Boolean whether to enable debug logging
+        """
         self.server = server
         self.access_token = access_token
         self.headers = {'Authorization': f'Bearer {self.access_token}'}
@@ -61,6 +70,11 @@ class jfIntegrity():
             self.logger.setLevel(logging.INFO)
 
     def test_connection(self):
+        """
+        Ensure Artifactory server responds without error.
+
+        :returns: Boolean indicating success or failure
+        """
         url = f'{self.server}'
         r = None
         try:
@@ -86,6 +100,13 @@ class jfIntegrity():
                 return False
 
     def get_stats(self, artifact):
+        """
+        Get the statistics for an artifact.
+
+        :param artifact: String artifact with full path to get statistics on
+        :returns: Dictionary constaining stats
+        :raises exception: if requests.exceptions.RequestException encountered, forwards it
+        """
         safe_artifact = parse.quote(artifact)
         url = f'{self.server}/artifactory/api/storage/{safe_artifact}'
         r = None
@@ -106,6 +127,13 @@ class jfIntegrity():
             self.logger.error(f'could not get stats for {artifact}')
 
     def get_trace(self, artifact):
+        """
+        Get the trace output for an artifact, indicating whether it can be downloaded without error.
+
+        :param artifact: String artifact with full path that should be traced
+        :returns: String text output of the result of the trace
+        :raises exception: if requests.exceptions.RequestException encountered, forwards it
+        """
         safe_artifact = parse.quote(artifact)
         url = f'{self.server}/artifactory/{safe_artifact}'
         params = {'skipUpdateStats': 'true', 'trace': 'null'}
@@ -127,6 +155,13 @@ class jfIntegrity():
             self.logger.error(f'could not get trace for {artifact}, received {r.status_code}')
 
     def get_contents(self, repository):
+        """
+        List the contents of a repository.
+
+        :param repository: String repository to list contents for
+        :returns: Dictionary of contents for the repository
+        :raises exception: if requests.exceptions.RequestException encountered, forwards it
+        """
         safe_repository = parse.quote(repository)
         url = f'{self.server}/artifactory/api/storage/{safe_repository}'
         r = None
@@ -152,6 +187,12 @@ class jfIntegrity():
             self.logger.error(f'could not get contents for {repository}')
 
     def del_artifact(self, artifact):
+        """
+        Remove an artifact unless that artifact is a folder; puts result in global List 'output.'
+
+        :param artifact: String name of the artifact with full path to remove
+        :raises exception: if requests.exceptions.RequestException encountered, forwards it
+        """
         self.logger.debug(f'start remove artifact {artifact}')
         global output
         safe_artifact = parse.quote(artifact)
@@ -182,6 +223,12 @@ class jfIntegrity():
             self.logger.error(f'unrecoverable error for artifact {artifact}')
 
     def qdel_artifact(self, q, thread_no):
+        """
+        Treaded removal of artifacts in a queue.
+
+        :param q: queue.Queue containing the String artifacts to remove
+        :param thread_no: Integer thread number for logging
+        """
         self.logger.info(f'started trace worker thread {thread_no}')
         while True:
             try:
@@ -193,6 +240,11 @@ class jfIntegrity():
             q.task_done()
 
     def trace(self, artifact):
+        """
+        Trace an artifact; puts result in global List 'output.'
+
+        :param artifact: String name of artifact with full path to trace
+        """
         self.logger.debug(f'started remove artifact {artifact}')
         global output
         safe_artifact = parse.quote(artifact)
@@ -209,6 +261,12 @@ class jfIntegrity():
             self.logger.error(f'{artifact}: {ARTIFACT_UNKNOWN}')
 
     def qtrace(self, q, thread_no):
+        """
+        Treaded trace of artifacts in a queue.
+
+        :param q: queue.Queue containing the String artifacts to trace
+        :param thread_no: Integer thread number for logging
+        """
         global output
         self.logger.info(f'started trace worker thread {thread_no}')
         while True:
@@ -221,6 +279,12 @@ class jfIntegrity():
             q.task_done()
 
     def is_folder(self, item):
+        """
+        Indicate if item is a folder (contains child key).
+
+        :param item: String full path of item
+        :returns: Boolean indicating if the item is a folder
+        """
         stats = self.get_stats(item)
         if stats:
             if 'children' in stats.keys():
@@ -233,11 +297,25 @@ class jfIntegrity():
         return False
 
     def is_later(self, date1, date2):
+        """
+        Indicate if date1 is later in time than date2.
+
+        :param date1: String in isoformat (artifactory dates are compatible)
+        :param date2: String in isoformat (artifactory dates are compatible)
+        :returns: Boolean, True if date1 is later in time, otherwise False
+        """
         date1 = datetime.fromisoformat(date1.rstrip('Z'))
         date2 = datetime.fromisoformat(date2.rstrip('Z'))
         return date1 > date2
 
     def read_items(self, file):
+        """
+        Get items from a file, assumes they are one item per line.
+
+        :param file: Path to the file
+        :returns: List containing the items
+        :raises: any exception that file like objects can throw would be raised here
+        """
         content = ''
         if not isfile(file):
             self.logger.error(f'non file or cannot read {file}')
@@ -250,6 +328,13 @@ class jfIntegrity():
             return content.strip().split('\n')
 
     def cat_artifacts(self, repos, after):
+        """
+        Get all artifacts from repos and list them together in one object.
+
+        :param repos: List of Strings name of repos to list artifacts from
+        :param after: String in format of YYYY-MM-DD if provided only artifacts younger will be included
+        :returns: List of artifacts from the repositories
+        """
         artifacts = []
         rarts = []
 
@@ -264,6 +349,15 @@ class jfIntegrity():
         return artifacts
 
     def compile_artifacts(self, repos=None, afile=None, rfile=None, after=None):
+        """
+        List artifacts from various sources.
+        
+        :param repos: List of strings with names of repos to list artifacts from
+        :param afile: String name of file containing artifacts to include in output, one per line
+        :param rfile: String name of file containing repos to list artifacts from, one per line
+        :param after: String date in format YYYY-MM-DD if provided only artifacts younger will be included
+        :returns: List of artifacts from the various sources, deduplicated
+        """
         arts = []
         afile_arts = []
         rfile_arts = []
