@@ -224,7 +224,7 @@ class jfIntegrity():
 
     def qdel_artifact(self, q, thread_no):
         """
-        Treaded removal of artifacts in a queue.
+        Threaded removal of artifacts in a queue.
 
         :param q: queue.Queue containing the String artifacts to remove
         :param thread_no: Integer thread number for logging
@@ -262,7 +262,7 @@ class jfIntegrity():
 
     def qtrace(self, q, thread_no):
         """
-        Treaded trace of artifacts in a queue.
+        Threaded trace of artifacts in a queue.
 
         :param q: queue.Queue containing the String artifacts to trace
         :param thread_no: Integer thread number for logging
